@@ -1,0 +1,21 @@
+[project]
+name = "travel-planner-with-adk"
+version = "0.1.0"
+description = "AI-powered travel planner with Streamlit UI and FastAPI backend"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Streamlit app
+    "streamlit>=1.28.0",
+    "google-adk[extensions]>=1.23.0",
+    "litellm>=1.0.0",
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+    "duckduckgo-search>=7.0.0",
+    "geopy>=2.4.1",
+    "python-dotenv>=1.2.1",
+    # FastAPI backend
+    "ag-ui-adk>=0.4.2",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
