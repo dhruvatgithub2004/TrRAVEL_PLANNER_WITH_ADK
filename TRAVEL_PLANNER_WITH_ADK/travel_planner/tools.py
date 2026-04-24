@@ -1,15 +1,16 @@
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.agents import Agent
 import os
-from geopy.geocoders import Nominatim
 import requests
+from math import radians, cos, sin, asin, sqrt
+from geopy.geocoders import Nominatim
 from google.adk.models.lite_llm import LiteLlm
 from tavily import TavilyClient
 from google.adk.tools import FunctionTool
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Load .env from the project root and fallback to the travel_planner subfolder.
+# Load environment variables
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -17,119 +18,151 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 if DEEPSEEK_API_KEY:
     os.environ["DEEPSEEK_API_KEY"] = DEEPSEEK_API_KEY
 
+# --- HELPER FUNCTIONS ---
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """Calculate the great circle distance in kilometers."""
+    R = 6371 # Earth radius in km
+    dLat, dLon = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dLat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dLon/2)**2
+    return 2 * R * asin(sqrt(a))
+
+# --- WEB SEARCH TOOL ---
+
 def web_search(query: str) -> str:
     """Search the web using Tavily."""
+    # FIX: Truncate query to stay under the 400 character limit
+    safe_query = query[:390]
+    
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
         return "Search unavailable: TAVILY_API_KEY is not set."
+    
     current_year = str(datetime.now().year)
     recency_words = ["latest", "recent", "current", "new", "developments", "update", current_year]
-    if any(w in query.lower() for w in recency_words) and current_year not in query:
-        query = f"{query} {current_year}"
+    
+    if any(w in safe_query.lower() for w in recency_words) and current_year not in safe_query:
+        safe_query = f"{safe_query} {current_year}"
+        
     client = TavilyClient(api_key=api_key)
-    response = client.search(query, max_results=5)
+    response = client.search(safe_query, max_results=5)
     results = response.get("results", [])
+    
     formatted = []
     for r in results:
+        # Keep content chunks concise
         formatted.append(f"**{r['title']}** ({r['url']}): {r['content'][:300]}...")
+    
     return "\n\n".join(formatted) or "No results found."
 
-google_search = FunctionTool(
-    func=web_search
-)
+google_search = FunctionTool(func=web_search)
 
+# --- GOOGLE SEARCH AGENT ---
 
-
-_search_agent= Agent(
+_search_agent = Agent(
     name="google_search_wrapped_agent",
-    model = LiteLlm(model="deepseek/deepseek-chat"),
+    model=LiteLlm(model="deepseek/deepseek-chat"),
     description="An agent providing Google-search grounding capability",
-    instruction= f"""
-        TODAY'S DATE: {datetime.now().strftime("%A, %B %d, %Y")}. Always treat {datetime.now().year} as the current year when searching or answering.
-        Answer the user's question directly using google_search grounding tool; Provide a brief but concise response.
-        Rather than a detail response, provide the immediate actionable item for a tourist or traveler, in a single sentence.
-        Do not ask the user to check or look up information for themselves, that's your role; do your best to be informative.
-        When searching for latest/recent/current information, always include "{datetime.now().year}" in your search query.
-        IMPORTANT:
-        - Always return your response in bullet points
-        - Specify what matters to the user
-        - Do not reference {datetime.now().year - 1} as the current year; it is {datetime.now().year}
+    instruction=f"""
+        TODAY'S DATE: {datetime.now().strftime("%A, %B %d, %Y")}. 
+        Answer the user's question directly using the google_search tool.
+        
+        CRITICAL RULES:
+        1. Your search queries MUST be short (keywords only, under 60 characters).
+        2. Provide actionable items for travelers in bullet points.
+        3. Always treat {datetime.now().year} as the current year.
+        4. If a request has multiple parts (e.g., two cities), call the tool separately for each.
     """,
     tools=[google_search]
 )
 google_search_grounding = AgentTool(agent=_search_agent)
 
-
+# --- NEARBY PLACES TOOL ---
 
 def find_nearby_places_open(query: str, location: str, radius: int = 3000, limit: int = 5) -> str:
-    """
-    Finds nearby places for any text query using ONLY free OpenStreetMap APIs (no API key needed).
-    
-    Args:
-        query (str): What you’re looking for (e.g., "restaurant", "hospital", "gym", "bar").
-        location (str): The city or area to search in.
-        radius (int): Search radius in meters (default: 3000).
-        limit (int): Number of results to show (default: 5).
-    
-    Returns:
-        str: List of matching place names and addresses.
-    """
-
+    """Finds nearby places using OpenStreetMap/Overpass API."""
     try:
-        # Step 1: Geocode the location to get coordinates
-        geolocator = Nominatim(user_agent="open_place_finder")
+        # Step 1: Geocode
+        geolocator = Nominatim(user_agent="travel_planner_pro_agent")
         loc = geolocator.geocode(location)
         if not loc:
             return f"Could not find location '{location}'."
 
         lat, lon = loc.latitude, loc.longitude
 
-        # Step 2: Query Overpass API for matching places
+        # Step 2: Overpass Query with headers to fix 406 Error
         overpass_url = "https://overpass-api.de/api/interpreter"
+        
+        # Improved query logic: searches name, amenity, and cuisine tags
         overpass_query = f"""
         [out:json][timeout:25];
         (
           node["name"~"{query}", i](around:{radius},{lat},{lon});
           node["amenity"~"{query}", i](around:{radius},{lat},{lon});
+          node["cuisine"~"{query}", i](around:{radius},{lat},{lon});
           node["shop"~"{query}", i](around:{radius},{lat},{lon});
         );
-        out body {limit};
+        out body;
         """
 
-        response = requests.get(overpass_url, params={"data": overpass_query})
+        # FIX: Added User-Agent headers to prevent 406 errors
+        headers = {'User-Agent': 'TravelPlannerApp/1.0 (contact@example.com)'}
+        response = requests.get(overpass_url, params={"data": overpass_query}, headers=headers)
+        
         if response.status_code != 200:
-            return f"Overpass API error: {response.status_code}"
+            return f"Overpass API error: {response.status_code}. Check if query is too complex."
 
         data = response.json()
         elements = data.get("elements", [])
         if not elements:
-            return f"No results found for '{query}' near {location}."
+            return f"No results found for '{query}' within {radius}m of {location}."
 
-        # Step 3: Format results
+        # Step 3: Format and calculate distance
         output = [f"Top results for '{query}' near {location}:"]
-        for el in elements[:limit]:
-            name = el.get("tags", {}).get("name", "Unnamed place")
-            street = el.get("tags", {}).get("addr:street", "")
-            city = el.get("tags", {}).get("addr:city", "")
+        
+        # Sort by proximity
+        results_list = []
+        for el in elements:
+            e_lat, e_lon = el.get("lat"), el.get("lon")
+            dist = calculate_distance(lat, lon, e_lat, e_lon)
+            
+            tags = el.get("tags", {})
+            name = tags.get("name", "Unnamed place")
+            street = tags.get("addr:street", "")
+            city = tags.get("addr:city", "")
             full_addr = ", ".join(filter(None, [street, city]))
-            output.append(f"- {name} | {full_addr if full_addr else 'Address not available'}")
+            
+            results_list.append({
+                "name": name,
+                "dist": dist,
+                "addr": full_addr if full_addr else "Address not available"
+            })
+
+        # Sort by distance and apply limit
+        sorted_results = sorted(results_list, key=lambda x: x['dist'])[:limit]
+
+        for r in sorted_results:
+            output.append(f"- {r['name']} | Distance: {r['dist']:.2f} km | Address: {r['addr']}")
 
         return "\n".join(output)
 
     except Exception as e:
         return f"Error searching for '{query}' near '{location}': {str(e)}"
 
-
 location_search_tool = FunctionTool(func=find_nearby_places_open)
 
+# --- PLACES AGENT ---
+
 places_agent = Agent(
-    model = LiteLlm(model="deepseek/deepseek-chat"),
+    model=LiteLlm(model="deepseek/deepseek-chat"),
     name="places_agent",
     description="Suggests locations based on user preferences",
     instruction="""
-            You are responsible for making suggestions on actual places based on the user's query. Limit the choices to 10 results.
-            Each place must have a name, location, and address.
-            You can use the places_tool to find the latitude and longitude of the place and address.
-        """,
+        You are a destination expert. Use the location_search_tool to find specific places.
+        Always verify the distance provided by the tool before recommending a spot as "walking distance."
+        - Walking distance: < 1.2 km
+        - Short drive: 1.2 km - 5 km
+        Each suggestion must include the name, the calculated distance, and the address.
+    """,
     tools=[location_search_tool]    
 )
