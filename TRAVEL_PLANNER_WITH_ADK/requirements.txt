@@ -1,7 +1,8 @@
+# Core Framework
 streamlit>=1.28.0
 
 # Google ADK and LLM
-google-adk>=1.23.0
+google-adk[extensions]>=1.23.0
 litellm>=1.0.0
 
 # OpenAI-compatible client (used by LiteLlm for DeepSeek routing)
