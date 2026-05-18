@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import os
 from dotenv import load_dotenv
@@ -294,13 +295,16 @@ if prompt := st.chat_input("Ask about your travel plans... 🎒"):
                 )
                 status_placeholder.empty()
 
-                # Step 2: stream the LLM response chunk by chunk
+                # Step 2: stream the LLM response word by word
                 response_container = [""]
 
                 async def _stream():
                     async for chunk in travel_agent._generate_stream(prompt, tool_context, conversation_history):
-                        response_container[0] += chunk
-                        message_placeholder.markdown(response_container[0] + "▌")
+                        words = chunk.split(" ")
+                        for word in words:
+                            response_container[0] += word + " "
+                            message_placeholder.markdown(response_container[0] + "▌")
+                            await asyncio.sleep(0.04)  # adjust for faster (0.02) or slower (0.07)
 
                 loop.run_until_complete(_stream())
                 full_response = response_container[0]
@@ -324,3 +328,4 @@ if prompt := st.chat_input("Ask about your travel plans... 🎒"):
             if st.session_state.debug_mode:
                 with st.expander("📋 Error Details"):
                     st.error(str(e), icon="🚨")
+```
