@@ -1,4 +1,3 @@
-
 import streamlit as st
 import os
 from dotenv import load_dotenv
@@ -6,6 +5,8 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.models.llm_request import LlmRequest
 from google.genai.types import Content, Part
 import asyncio
+import threading
+import time
 from datetime import datetime
 
 # Load environment variables from .env files (local development only)
@@ -39,6 +40,20 @@ if not DEEPSEEK_API_KEY:
         "DEEPSEEK_API_KEY is missing. Please add it to `.env` at the project root or `travel_planner/.env`, then restart Streamlit."
     )
     st.stop()
+
+# Rotating spinner messages shown while gathering context
+SPINNER_MESSAGES = [
+    "🤔 Thinking...",
+    "🔍 Searching the web...",
+    "✈️ Exploring destinations...",
+    "🌍 Finding the best options for you...",
+    "📚 Gathering travel insights...",
+    "🗺️ Checking the latest info...",
+    "💡 Almost there...",
+    "🏖️ Curating your perfect trip...",
+    "⏳ Hang tight, nearly done...",
+    "🧳 Packing the details...",
+]
 
 
 def _build_system_prompt() -> str:
@@ -288,14 +303,29 @@ if prompt := st.chat_input("Ask about your travel plans... 🎒"):
             asyncio.set_event_loop(loop)
 
             try:
-                # Step 1: gather tool context (search / location lookup)
-                status_placeholder.info("🔄 Gathering information...")
-                tool_context = loop.run_until_complete(
-                    travel_agent._gather_context(prompt)
-                )
-                status_placeholder.empty()
+                # --- Rotating spinner while gathering context ---
+                stop_spinner = threading.Event()
 
-                # Step 2: stream the LLM response word by word
+                def _animate_spinner():
+                    i = 0
+                    while not stop_spinner.is_set():
+                        status_placeholder.info(SPINNER_MESSAGES[i % len(SPINNER_MESSAGES)])
+                        i += 1
+                        time.sleep(1.5)
+
+                spinner_thread = threading.Thread(target=_animate_spinner, daemon=True)
+                spinner_thread.start()
+
+                try:
+                    tool_context = loop.run_until_complete(
+                        travel_agent._gather_context(prompt)
+                    )
+                finally:
+                    stop_spinner.set()
+                    spinner_thread.join()
+                    status_placeholder.empty()
+
+                # --- Stream the LLM response word by word ---
                 response_container = [""]
 
                 async def _stream():
@@ -304,7 +334,7 @@ if prompt := st.chat_input("Ask about your travel plans... 🎒"):
                         for word in words:
                             response_container[0] += word + " "
                             message_placeholder.markdown(response_container[0] + "▌")
-                            await asyncio.sleep(0.04)  # adjust for faster (0.02) or slower (0.07)
+                            await asyncio.sleep(0.04)  # adjust: 0.02 faster / 0.07 slower
 
                 loop.run_until_complete(_stream())
                 full_response = response_container[0]
