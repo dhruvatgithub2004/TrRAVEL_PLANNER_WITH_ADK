@@ -5,7 +5,6 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.models.llm_request import LlmRequest
 from google.genai.types import Content, Part
 import asyncio
-import json
 from datetime import datetime
 
 # Load environment variables from .env files (local development only)
@@ -40,6 +39,7 @@ if not DEEPSEEK_API_KEY:
     )
     st.stop()
 
+
 def _build_system_prompt() -> str:
     now = datetime.now()
     return f"""
@@ -63,6 +63,7 @@ Available tools:
 When users ask about specific locations or places, use the location search tool.
 When users ask about current events, news, latest developments, or general travel information, use the web search tool.
 """
+
 
 class SimpleTravelAgent:
     def __init__(self, llm):
@@ -164,7 +165,6 @@ class SimpleTravelAgent:
 
     async def _gather_context(self, message: str) -> str:
         """Run all relevant tools and return combined context string."""
-        import re
         message_lower = message.lower()
         parts = []
 
@@ -295,15 +295,15 @@ if prompt := st.chat_input("Ask about your travel plans... 🎒"):
                 status_placeholder.empty()
 
                 # Step 2: stream the LLM response chunk by chunk
-                full_response = ""
+                response_container = [""]
 
                 async def _stream():
-                    nonlocal full_response
                     async for chunk in travel_agent._generate_stream(prompt, tool_context, conversation_history):
-                        full_response += chunk
-                        message_placeholder.markdown(full_response + "▌")  # blinking cursor effect
+                        response_container[0] += chunk
+                        message_placeholder.markdown(response_container[0] + "▌")
 
                 loop.run_until_complete(_stream())
+                full_response = response_container[0]
 
             finally:
                 loop.close()
