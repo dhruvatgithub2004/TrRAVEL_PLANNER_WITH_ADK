@@ -7,206 +7,170 @@ from google.genai.types import Content, Part
 import asyncio
 from datetime import datetime
 
-# Load environment variables
+# ====================== CONFIG ======================
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), "travel_planner", ".env"))
 
-# API Keys
-DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY", None) or os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
 if DEEPSEEK_API_KEY:
     os.environ["DEEPSEEK_API_KEY"] = DEEPSEEK_API_KEY
 
-TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", None) or os.getenv("TAVILY_API_KEY")
+TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY") or os.getenv("TAVILY_API_KEY")
 if TAVILY_API_KEY:
     os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 
 from travel_planner.tools import web_search, find_nearby_places_open
 
-# Initialize LLM
 llm = LiteLlm(model="deepseek/deepseek-chat")
 
 if not DEEPSEEK_API_KEY:
-    st.set_page_config(page_title="Travel Planner Chatbot", page_icon="🌍", layout="wide")
-    st.title("🌍 Travel Planner Chatbot")
-    st.error("DEEPSEEK_API_KEY is missing.")
+    st.error("DEEPSEEK_API_KEY is missing!")
     st.stop()
 
-def _build_system_prompt() -> str:
-    now = datetime.now()
-    return f"""You are an exclusive travel concierge agent. You help users discover their dream holiday destinations and plan their vacations.
-TODAY'S DATE: {now.strftime("%A, %B %d, %Y")}. Current time: {now.strftime("%H:%M")}.
-
-Your role:
-- Provide personalized travel recommendations
-- Suggest nearby attractions, hotels, cafes, and points of interest
-- Use tools for real-time information
-- Be informative, concise, and professional
-"""
-
+# ====================== AGENT CLASS ======================
 class SimpleTravelAgent:
     def __init__(self, llm):
         self.llm = llm
 
     async def _gather_context(self, message: str) -> str:
-        import re
         message_lower = message.lower()
         parts = []
 
         # Web Search
-        search_triggers = ["event", "news", "current", "latest", "weather", "visa", "flight", 
-                          "festival", "trending", str(datetime.now().year)]
-        if any(w in message_lower for w in search_triggers):
+        if any(word in message_lower for word in ["event", "news", "current", "latest", "weather", "visa", "flight", "festival", "what", "how", "best"]):
             try:
                 result = web_search(message)
-                if result and "No results found" not in result:
-                    parts.append(f"WEB SEARCH RESULTS:\n{result}")
-            except Exception as e:
-                parts.append(f"(Web search failed: {e})")
+                if result and "No results found" not in str(result):
+                    parts.append(f"WEB SEARCH:\n{result}")
+            except:
+                pass
 
-        # Location Search
-        location_triggers = ["near", "nearby", "around", "hotel", "restaurant", "cafe", 
-                           "beach", "attraction"]
-        if any(w in message_lower for w in location_triggers):
+        # Nearby Places
+        if any(word in message_lower for word in ["near", "nearby", "around", "hotel", "restaurant", "cafe", "beach"]):
             location = self._extract_location(message)
             if location:
-                place_query = self._extract_place_query(message)
                 try:
-                    result = find_nearby_places_open(place_query, location)
-                    if result and "No results found" not in result:
-                        parts.append(f"NEARBY PLACES:\n{result}")
-                except Exception as e:
-                    parts.append(f"(Location search failed: {e})")
+                    result = find_nearby_places_open("attraction", location)
+                    if result:
+                        parts.append(f"NEARBY PLACES near {location}:\n{result}")
+                except:
+                    pass
 
         return "\n\n".join(parts)
 
     def _extract_location(self, message: str) -> str:
         import re
-        match = re.search(r'\b(?:in|near|around|close to)\s+([A-Z][a-zA-Z\s]{1,40}?)', 
-                         message, re.IGNORECASE)
+        match = re.search(r'\b(?:in|near|around|close to)\s+([A-Za-z\s]+)', message, re.IGNORECASE)
         return match.group(1).strip().title() if match else ""
 
-    def _extract_place_query(self, message: str) -> str:
-        place_types = ["hotel", "restaurant", "cafe", "beach", "attraction"]
-        msg_lower = message.lower()
-        for p in place_types:
-            if p in msg_lower:
-                return p
-        return "attraction"
-
-    async def generate_stream(self, user_message: str, tool_context: str, conversation_history: list = None):
+    async def generate_stream(self, user_message: str, tool_context: str, history: list = None):
         """Async generator for streaming"""
         try:
+            enriched = user_message
             if tool_context:
-                enriched_message = f"[Real-time data retrieved]\n\n{tool_context}\n\n---\nUser question: {user_message}"
-            else:
-                enriched_message = user_message
+                enriched = f"[Real-time context]\n{tool_context}\n\nUser: {user_message}"
 
             contents = [
                 Content(role="user", parts=[Part(text=_build_system_prompt())]),
                 Content(role="model", parts=[Part(text="Understood.")]),
             ]
 
-            if conversation_history:
-                for msg in conversation_history[-8:]:
+            if history:
+                for msg in history[-6:]:
                     role = "user" if msg["role"] == "user" else "model"
                     contents.append(Content(role=role, parts=[Part(text=msg["content"])]))
 
-            contents.append(Content(role="user", parts=[Part(text=enriched_message)]))
+            contents.append(Content(role="user", parts=[Part(text=enriched)]))
 
-            llm_request = LlmRequest(
-                contents=contents,
-                config={"temperature": 0.7, "max_output_tokens": 1500}
-            )
+            request = LlmRequest(contents=contents, config={"temperature": 0.7, "max_output_tokens": 2000})
 
-            response_generator = self.llm.generate_content_async(llm_request)
-            async for resp in response_generator:
-                if hasattr(resp, "content") and resp.content and resp.content.parts:
-                    for part in resp.content.parts:
-                        if hasattr(part, "text") and part.text:
+            response_gen = self.llm.generate_content_async(request)
+            async for response in response_gen:
+                if response.content and response.content.parts:
+                    for part in response.content.parts:
+                        if part.text:
                             yield part.text
 
         except Exception as e:
-            yield f"\n\nI apologize, an error occurred: {str(e)}"
+            yield f"\n\nError: {str(e)}"
 
 
-# Initialize Agent
+def _build_system_prompt() -> str:
+    now = datetime.now()
+    return f"""You are a helpful travel concierge. Today's date is {now.strftime("%A, %B %d, %Y")}.
+Be friendly, concise and useful."""
+
+
+# ====================== INITIALIZE ======================
 travel_agent = SimpleTravelAgent(llm)
 
-# ====================== STREAMLIT UI ======================
-st.set_page_config(page_title="Travel Planner Chatbot", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="Travel Planner", page_icon="🌍", layout="wide")
 st.title("🌍 Travel Planner Chatbot")
-st.markdown("Powered by Google ADK & DeepSeek • Real-time streaming")
+st.caption("Streaming enabled • Powered by DeepSeek")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "debug_mode" not in st.session_state:
-    st.session_state.debug_mode = False
 
 # Sidebar
 with st.sidebar:
-    st.header("⚙️ Settings")
-    st.session_state.debug_mode = st.checkbox("Debug Mode", value=st.session_state.debug_mode)
-    
-    if st.button("🗑️ Clear Chat History"):
+    if st.button("Clear Chat"):
         st.session_state.messages = []
         st.rerun()
+    st.checkbox("Debug Mode", key="debug_mode")
 
-# Display previous messages
+# Display messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Chat Input
-if prompt := st.chat_input("Ask about your travel plans..."):
+# ====================== CHAT INPUT ======================
+if prompt := st.chat_input("Where do you want to go?"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
-        status_placeholder = st.empty()
-        
-        status_placeholder.info("🔄 Thinking...")
+        status = st.empty()
+        status.info("🔍 Searching & thinking...")
 
         try:
-            conversation_history = st.session_state.messages[:-1]
-
-            # Run async parts
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
+            history = st.session_state.messages[:-1]
             tool_context = loop.run_until_complete(travel_agent._gather_context(prompt))
 
-            status_placeholder.info("✍️ Generating response...")
+            status.info("✍️ Generating response...")
 
             full_response = ""
-            # Stream tokens
-            async_gen = travel_agent.generate_stream(prompt, tool_context, conversation_history)
-            
-            for chunk in loop.run_until_complete(asyncio.gather(async_gen.__anext__())):  # Better way below
-                pass  # We'll replace this with proper streaming
+            stream = travel_agent.generate_stream(prompt, tool_context, history)
 
-            # === Proper Streaming Fix ===
-            full_response = ""
-            try:
-                while True:
-                    chunk = loop.run_until_complete(async_gen.__anext__())
-                    if chunk:
-                        full_response += chunk
-                        message_placeholder.markdown(full_response + " ▌")
-            except StopAsyncIteration:
-                pass
+            # Proper streaming in Streamlit
+            while True:
+                try:
+                    chunk = loop.run_until_complete(stream.__anext__())
+                    full_response += chunk
+                    message_placeholder.markdown(full_response + "▌")
+                except StopAsyncIteration:
+                    break
+                except Exception:
+                    break
 
-            # Final output
             message_placeholder.markdown(full_response)
+
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
+            # Debug
             if st.session_state.debug_mode and tool_context:
-                with st.expander("Debug Info"):
-                    st.code(tool_context, language="text")
+                with st.expander("Debug - Tool Context"):
+                    st.code(tool_context)
 
         except Exception as e:
             message_placeholder.error(f"Error: {str(e)}")
         finally:
-            status_placeholder.empty()
-            loop.close()
+            status.empty()
+            try:
+                loop.close()
+            except:
+                pass
