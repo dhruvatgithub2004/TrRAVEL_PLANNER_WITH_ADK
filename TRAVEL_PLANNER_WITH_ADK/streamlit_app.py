@@ -328,4 +328,3 @@ if prompt := st.chat_input("Ask about your travel plans... 🎒"):
             if st.session_state.debug_mode:
                 with st.expander("📋 Error Details"):
                     st.error(str(e), icon="🚨")
-```
