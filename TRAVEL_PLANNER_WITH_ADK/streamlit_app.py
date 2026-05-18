@@ -80,8 +80,6 @@ class SimpleTravelAgent:
 
     async def _generate(self, user_message: str, tool_context: str, conversation_history: list = None) -> str:
         try:
-            # Inject search results directly into the user message so the LLM
-            # always receives a user turn last (required by the chat API contract)
             if tool_context:
                 enriched_message = (
                     f"[Real-time data retrieved for your question — use this to answer accurately]\n\n"
@@ -124,6 +122,45 @@ class SimpleTravelAgent:
 
         except Exception as e:
             return f"I apologize, but I encountered an error: {str(e)}. Please try again."
+
+    async def _generate_stream(self, user_message: str, tool_context: str, conversation_history: list = None):
+        """Async generator that yields text chunks as they arrive from the LLM."""
+        try:
+            if tool_context:
+                enriched_message = (
+                    f"[Real-time data retrieved for your question — use this to answer accurately]\n\n"
+                    f"{tool_context}\n\n"
+                    f"---\n"
+                    f"User question: {user_message}"
+                )
+            else:
+                enriched_message = user_message
+
+            contents = [
+                Content(role="user", parts=[Part(text=_build_system_prompt())]),
+                Content(role="model", parts=[Part(text="Understood. I am your travel concierge and will use the provided real-time data to answer accurately.")]),
+            ]
+
+            if conversation_history:
+                for msg in conversation_history[-8:]:
+                    role = "user" if msg["role"] == "user" else "model"
+                    contents.append(Content(role=role, parts=[Part(text=msg["content"])]))
+
+            contents.append(Content(role="user", parts=[Part(text=enriched_message)]))
+
+            llm_request = LlmRequest(
+                contents=contents,
+                config={"temperature": 0.7, "max_output_tokens": 1500}
+            )
+
+            async for resp in self.llm.generate_content_async(llm_request):
+                if hasattr(resp, "content") and resp.content and resp.content.parts:
+                    for part in resp.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            yield part.text
+
+        except Exception as e:
+            yield f"I apologize, but I encountered an error: {str(e)}. Please try again."
 
     async def _gather_context(self, message: str) -> str:
         """Run all relevant tools and return combined context string."""
@@ -168,7 +205,6 @@ class SimpleTravelAgent:
 
     def _extract_location(self, message: str) -> str:
         import re
-        # Pattern: "in/near/around <Location>" — grab up to 4 words
         match = re.search(
             r'\b(?:in|near|around|close to)\s+([A-Z][a-zA-Z\s]{1,40}?)(?:\?|,|\.| hotel| restaurant| cafe|$)',
             message, re.IGNORECASE
@@ -189,6 +225,7 @@ class SimpleTravelAgent:
             if p in message_lower:
                 return p
         return "attraction"
+
 
 # Initialize the travel agent
 travel_agent = SimpleTravelAgent(llm)
@@ -214,11 +251,11 @@ if "debug_mode" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Settings")
     st.session_state.debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.debug_mode)
-    
+
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
         st.rerun()
-    
+
     st.markdown("---")
     st.markdown("""
     ### 💡 Tips
@@ -235,50 +272,55 @@ for message in st.session_state.messages:
 
 # Chat input
 if prompt := st.chat_input("Ask about your travel plans... 🎒"):
-    # Add user message to chat
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-    
-    # Get bot response
+
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         status_placeholder = st.empty()
-        
+
         try:
-            status_placeholder.info("🔄 Processing your request...")
-            
-            # Call the travel agent asynchronously with conversation history
-            # Get conversation history (all messages except the current user message)
             conversation_history = st.session_state.messages[:-1] if len(st.session_state.messages) > 1 else None
-            
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+
             try:
-                full_response, tool_context = loop.run_until_complete(
-                    travel_agent.run_with_context(prompt, conversation_history)
+                # Step 1: gather tool context (search / location lookup)
+                status_placeholder.info("🔄 Gathering information...")
+                tool_context = loop.run_until_complete(
+                    travel_agent._gather_context(prompt)
                 )
+                status_placeholder.empty()
+
+                # Step 2: stream the LLM response chunk by chunk
+                full_response = ""
+
+                async def _stream():
+                    nonlocal full_response
+                    async for chunk in travel_agent._generate_stream(prompt, tool_context, conversation_history):
+                        full_response += chunk
+                        message_placeholder.markdown(full_response + "▌")  # blinking cursor effect
+
+                loop.run_until_complete(_stream())
+
             finally:
                 loop.close()
 
-            status_placeholder.empty()
-            message_placeholder.markdown(full_response)
-            
-            # Add assistant message to chat history
+            message_placeholder.markdown(full_response)  # final render, remove cursor
             st.session_state.messages.append({"role": "assistant", "content": full_response})
-            
-            # Debug info
+
             if st.session_state.debug_mode:
                 with st.expander("📋 Debug Info"):
                     st.write("**Current Query:**", prompt)
                     st.write("**Tool Context Retrieved:**")
                     st.code(tool_context or "(no search performed)", language="text")
                     st.write("**Full Response:**", full_response)
-        
+
         except Exception as e:
             status_placeholder.empty()
-            error_msg = f"❌ Error: {str(e)}"
-            message_placeholder.error(error_msg)
+            message_placeholder.error(f"❌ Error: {str(e)}")
             if st.session_state.debug_mode:
                 with st.expander("📋 Error Details"):
                     st.error(str(e), icon="🚨")
