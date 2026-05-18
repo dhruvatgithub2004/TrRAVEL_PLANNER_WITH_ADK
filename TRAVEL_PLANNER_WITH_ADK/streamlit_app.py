@@ -154,7 +154,7 @@ if prompt := st.chat_input("Ask me anything about travel..."):
                         message_placeholder.markdown(full_response + "▌")
                         
                         # === Slower, more natural streaming ===
-                        time.sleep(0.025)   # Adjust this value (0.02 = fast, 0.04 = slower)
+                        time.sleep(0.04)   # Adjust this value (0.02 = fast, 0.04 = slower)
                         
                 except StopAsyncIteration:
                     break
